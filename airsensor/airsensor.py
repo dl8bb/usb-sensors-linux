@@ -20,6 +20,7 @@ Verwendung:
     python3 airsensor.py -v        # Nur VOC-Wert ausgeben
     python3 airsensor.py -o        # Ein Wert und dann beenden
     python3 airsensor.py -s        # Auf Scroll pHAT HD anzeigen
+    python3 airsensor.py -r        # Display um 180 Grad drehen
     python3 airsensor.py -h        # Hilfe
 """
 
@@ -49,10 +50,11 @@ class AirSensor:
     VOC_MIN = 450
     VOC_MAX = 2001
 
-    def __init__(self, debug=False, use_display=False):
+    def __init__(self, debug=False, use_display=False, rotate_display=False):
         """Initialisiere den AirSensor."""
         self.debug = debug
         self.use_display = use_display
+        self.rotate_display = rotate_display
         self.dev = None
         self.devh = None
         self.last_voc = None
@@ -73,6 +75,9 @@ class AirSensor:
                 sys.exit(1)
 
             try:
+                # Display um 180 Grad drehen, falls gewünscht
+                # scrollphathd.set_rotation(180 if self.rotate_display else 0)
+                scrollphathd.rotate(degrees=180)
                 scrollphathd.set_brightness(0.5)  # Helligkeit anpassen (0.0-1.0)
                 scrollphathd.clear()
                 self._display_message("AirSensor", scroll=True)
@@ -82,6 +87,8 @@ class AirSensor:
 
             if self.debug:
                 self._log("DEBUG: Display initialized")
+                if self.rotate_display:
+                    self._log("DEBUG: Display rotated 180 degrees", 0)
 
     def _display_message(self, message, scroll=False, duration=2):
         """Nachricht auf dem Display anzeigen."""
@@ -321,6 +328,8 @@ def main():
     parser.add_argument("-o", "--one-read", action="store_true", help="Ein Wert und dann beenden")
     parser.add_argument("-s", "--scrollphat", action="store_true",
                         help="Auf Scroll pHAT HD anzeigen")
+    parser.add_argument("-r", "--rotate", action="store_true",
+                        help="Display-Ausgabe um 180 Grad drehen")
 
     args = parser.parse_args()
 
@@ -328,7 +337,8 @@ def main():
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"{timestamp}, DEBUG: Active")
 
-    sensor = AirSensor(debug=args.debug, use_display=args.scrollphat)
+    sensor = AirSensor(debug=args.debug, use_display=args.scrollphat,
+                       rotate_display=args.rotate)
     sensor.run(print_voc_only=args.voc_only, one_read=args.one_read)
 
 
