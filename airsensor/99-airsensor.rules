@@ -1,0 +1,14 @@
+# udev-Regel für AirSensor USB-Gerä··t
+# Datei: /etc/udev/rules.d/99-airsensor.rules
+#
+# Erlaubt einem bestimmten Benutzer den Zugriff auf das AirSensor-Gerä··t
+# ohne Root-Rechte
+
+# Option 1: Zugriff für alle Benutzer in der Gruppe 'plugdev' (empfohlen)
+SUBSYSTEM=="usb", ATTR{idVendor}=="03eb", ATTR{idProduct}=="2013", MODE="0660", GROUP="plugdev"
+
+# Option 2: Zugriff für einen spezifischen Benutzer (z.B. 'sebastian')
+# SUBSYSTEM=="usb", ATTR{idVendor}=="03eb", ATTR{idProduct}=="2013", MODE="0660", OWNER="sebastian"
+
+# Option 3: Zugriff für alle Benutzer (weniger sicher)
+# SUBSYSTEM=="usb", ATTR{idVendor}=="03eb", ATTR{idProduct}=="2013", MODE="0666"
