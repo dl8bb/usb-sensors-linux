@@ -32,6 +32,7 @@ from datetime import datetime
 
 import usb.core
 import usb.util
+from usb.core import USBError
 
 # Scroll pHAT HD optional importieren
 try:
@@ -49,6 +50,7 @@ class AirSensor:
     PRODUCT_ID = 0x2013
     VOC_MIN = 450
     VOC_MAX = 2001
+    MAX_RECONNECT_ATTEMPTS = 5
 
     def __init__(self, debug=False, use_display=False, rotate_display=False):
         """Initialisiere den AirSensor."""
@@ -75,10 +77,12 @@ class AirSensor:
                 sys.exit(1)
 
             try:
-                # Display um 180 Grad drehen, falls gewünscht
-                # scrollphathd.set_rotation(180 if self.rotate_display else 0)
-                scrollphathd.rotate(degrees=180)
                 scrollphathd.set_brightness(0.5)  # Helligkeit anpassen (0.0-1.0)
+                
+                # Display um 180 Grad drehen, falls gewünscht
+                if self.rotate_display:
+                    scrollphathd.rotate(180)
+                
                 scrollphathd.clear()
                 self._display_message("AirSensor", scroll=True)
             except Exception as e:
@@ -131,6 +135,18 @@ class AirSensor:
             if self.debug:
                 print(f"DEBUG: Display VOC error: {e}")
 
+    def _display_error(self, message):
+        """Fehlermeldung auf dem Display anzeigen."""
+        if not self.use_display:
+            return
+
+        try:
+            scrollphathd.clear()
+            scrollphathd.write_string(message)
+            scrollphathd.show()
+        except Exception:
+            pass
+
     def _release_usb_device(self, signum=None, frame=None):
         """USB-Gerä··t freigeben und beenden."""
         if self.use_display:
@@ -159,6 +175,71 @@ class AirSensor:
             print(f"{timestamp}, {message}")
         else:
             print(f"{timestamp}, {message} {value}")
+
+    def _close_device(self):
+        """USB-Gerä··t schließen."""
+        if self.devh:
+            try:
+                usb.util.release_interface(self.devh, 0)
+            except Exception:
+                pass
+            try:
+                self.devh.close()
+            except Exception:
+                pass
+        self.devh = None
+        self.dev = None
+
+    def _reconnect(self):
+        """Versuche, das USB-Gerä··t neu zu verbinden."""
+        if self.debug:
+            self._log("DEBUG: Attempting to reconnect...")
+
+        self._close_device()
+
+        for attempt in range(1, self.MAX_RECONNECT_ATTEMPTS + 1):
+            if self.debug:
+                self._log("DEBUG: Reconnect attempt", attempt)
+
+            try:
+                self.dev = usb.core.find(idVendor=self.VENDOR_ID, idProduct=self.PRODUCT_ID)
+                if self.dev is None:
+                    if self.debug:
+                        self._log("DEBUG: Device not found, waiting...")
+                    time.sleep(2)
+                    continue
+
+                self.devh = usb.core.find(idVendor=self.VENDOR_ID, idProduct=self.PRODUCT_ID)
+                
+                # Kernel-Treiber trennen, falls nötig
+                try:
+                    if self.devh.is_kernel_driver_active(0):
+                        self.devh.detach_kernel_driver(0)
+                except (usb.core.USBError, NotImplementedError):
+                    pass
+
+                # Interface beanspruchen
+                try:
+                    self.devh.set_configuration()
+                    usb.util.claim_interface(self.devh, 0)
+                except usb.core.USBError as e:
+                    if self.debug:
+                        self._log("DEBUG: Claim failed, retrying:", str(e))
+                    time.sleep(1)
+                    continue
+
+                if self.debug:
+                    self._log("DEBUG: Reconnect successful")
+                return True
+
+            except Exception as e:
+                if self.debug:
+                    self._log("DEBUG: Reconnect error:", str(e))
+                time.sleep(2)
+
+        if self.debug:
+            self._log("DEBUG: Reconnect failed after", self.MAX_RECONNECT_ATTEMPTS)
+        return False
 
     def find_device(self):
         """Suche nach dem AirSensor USB-Gerä··t."""
@@ -211,113 +292,183 @@ class AirSensor:
 
     def read_voc(self):
         """Lese VOC-Wert vom Sensor."""
-        if self.debug:
-            self._log("DEBUG: Read any remaining data from USB")
-
-        # Puffer leeren
         try:
-            ret = self.devh.read(0x81, 16, timeout=1000)
             if self.debug:
-                self._log("DEBUG: Return code from USB read:", len(ret) if ret else 0)
-        except usb.core.USBError:
-            pass
+                self._log("DEBUG: Read any remaining data from USB")
 
-        # USB-Kommando zum Anfordern von Daten: @h*TR
-        if self.debug:
-            self._log("DEBUG: Write data to device")
+            # Puffer leeren
+            try:
+                ret = self.devh.read(0x81, 16, timeout=1000)
+                if self.debug:
+                    self._log("DEBUG: Return code from USB read:", len(ret) if ret else 0)
+            except usb.core.USBError:
+                pass
 
-        command = b"\x40\x68\x2a\x54\x52\x0a\x40\x40\x40\x40\x40\x40\x40\x40\x40\x40"
-        ret = self.devh.write(0x02, command, timeout=1000)
-
-        if self.debug:
-            self._log("DEBUG: Return code from USB write:", ret)
-
-        if self.debug:
-            self._log("DEBUG: Read USB")
-
-        try:
-            buf = self.devh.read(0x81, 16, timeout=1000)
-        except usb.core.USBError as e:
+            # USB-Kommando zum Anfordern von Daten: @h*TR
             if self.debug:
-                self._log("DEBUG: USB read error:", str(e))
-            return None
+                self._log("DEBUG: Write data to device")
 
-        if self.debug:
-            self._log("DEBUG: Return code from USB read:", len(buf) if buf else 0)
+            command = b"\x40\x68\x2a\x54\x52\x0a\x40\x40\x40\x40\x40\x40\x40\x40\x40\x40"
+            ret = self.devh.write(0x02, command, timeout=1000)
 
-        # Wenn ret == 0, nochmal lesen
-        if len(buf) == 0:
+            if self.debug:
+                self._log("DEBUG: Return code from USB write:", ret)
+
             if self.debug:
                 self._log("DEBUG: Read USB")
-            time.sleep(1)
+
             try:
                 buf = self.devh.read(0x81, 16, timeout=1000)
-            except usb.core.USBError:
+            except usb.core.USBError as e:
+                if self.debug:
+                    self._log("DEBUG: USB read error:", str(e))
                 return None
 
             if self.debug:
                 self._log("DEBUG: Return code from USB read:", len(buf) if buf else 0)
 
-        # VOC-Wert aus Buffer extrahieren (Byte 2-3, Little Endian)
-        if len(buf) >= 4:
-            iresult = (buf[3] << 8) | buf[2]
-            voc = iresult  # Bereits Little Endian auf x86/x64
-        else:
-            return None
+            # Wenn ret == 0, nochmal lesen
+            if len(buf) == 0:
+                if self.debug:
+                    self._log("DEBUG: Read USB")
+                time.sleep(1)
+                try:
+                    buf = self.devh.read(0x81, 16, timeout=1000)
+                except usb.core.USBError:
+                    return None
 
-        time.sleep(1)
+                if self.debug:
+                    self._log("DEBUG: Return code from USB read:", len(buf) if buf else 0)
 
-        # Puffer leeren (flush)
-        if self.debug:
-            self._log("DEBUG: Read USB [flush]")
+            # VOC-Wert aus Buffer extrahieren (Byte 2-3, Little Endian)
+            if len(buf) >= 4:
+                iresult = (buf[3] << 8) | buf[2]
+                voc = iresult  # Bereits Little Endian auf x86/x64
+            else:
+                return None
 
-        try:
-            ret = self.devh.read(0x81, 16, timeout=1000)
+            time.sleep(1)
+
+            # Puffer leeren (flush)
             if self.debug:
-                self._log("DEBUG: Return code from USB read:", len(ret) if ret else 0)
-        except usb.core.USBError:
-            pass
+                self._log("DEBUG: Read USB [flush]")
 
-        return voc
+            try:
+                ret = self.devh.read(0x81, 16, timeout=1000)
+                if self.debug:
+                    self._log("DEBUG: Return code from USB read:", len(ret) if ret else 0)
+            except usb.core.USBError:
+                pass
+
+            return voc
+
+        except USBError as e:
+            # USB-Fehler abfangen und None zurückgeben
+            if self.debug:
+                self._log("DEBUG: USBError in read_voc:", str(e))
+            return None
+        except Exception as e:
+            # Andere Fehler abfangen
+            if self.debug:
+                self._log("DEBUG: Exception in read_voc:", str(e))
+            return None
 
     def run(self, print_voc_only=False, one_read=False):
         """Hauptschleife."""
         self.find_device()
         self.open_device()
 
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+
         while True:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            voc = self.read_voc()
+                voc = self.read_voc()
 
-            if voc is None:
-                if print_voc_only:
-                    print("0")
+                if voc is None:
+                    consecutive_errors += 1
+                    
+                    if print_voc_only:
+                        print("0")
+                    else:
+                        print(f"{timestamp}, ERROR: Invalid result code")
+                    
+                    if self.use_display:
+                        self._display_error("Err")
+                    
+                    # Prüfen ob wir neu verbinden müssen
+                    if consecutive_errors >= max_consecutive_errors:
+                        if self.debug:
+                            self._log("DEBUG: Too many errors, reconnecting...")
+                        if self._reconnect():
+                            consecutive_errors = 0
+                        else:
+                            if self.use_display:
+                                self._display_error("NoDev")
+                            time.sleep(5)
+                elif self.VOC_MIN <= voc <= self.VOC_MAX:
+                    consecutive_errors = 0
+                    
+                    if print_voc_only:
+                        print(voc)
+                    else:
+                        print(f"{timestamp}, VOC: {voc}, RESULT: OK")
+                    
+                    if self.use_display:
+                        self._display_voc(voc)
                 else:
-                    print(f"{timestamp}, ERROR: Invalid result code")
-                if self.use_display:
-                    self._display_message("Error", scroll=True)
-            elif self.VOC_MIN <= voc <= self.VOC_MAX:
-                if print_voc_only:
-                    print(voc)
-                else:
-                    print(f"{timestamp}, VOC: {voc}, RESULT: OK")
-                if self.use_display:
-                    self._display_voc(voc)
-            else:
-                if print_voc_only:
-                    print("0")
-                else:
-                    print(f"{timestamp}, VOC: {voc}, RESULT: Error value out of range")
-                if self.use_display:
-                    self._display_message(f"Err:{voc}", scroll=True)
+                    consecutive_errors = 0
+                    
+                    if print_voc_only:
+                        print("0")
+                    else:
+                        print(f"{timestamp}, VOC: {voc}, RESULT: Error value out of range")
+                    
+                    if self.use_display:
+                        self._display_message(f"Err:{voc}", scroll=True)
 
-            # Wenn nur ein Wert gelesen werden soll, beenden
-            if one_read:
-                self._release_usb_device()
+                # Wenn nur ein Wert gelesen werden soll, beenden
+                if one_read:
+                    self._release_usb_device()
 
-            # Warte auf nächste Anfrage
-            time.sleep(10)
+                # Warte auf nächste Anfrage
+                time.sleep(10)
+
+            except USBError as e:
+                # USB-Fehler in der Hauptschleife abfangen
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if self.debug:
+                    self._log("DEBUG: USBError in main loop:", str(e))
+                
+                if not print_voc_only:
+                    print(f"{timestamp}, ERROR: USB error - attempting reconnect")
+                
+                if self.use_display:
+                    self._display_error("Reconn")
+                
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    if self._reconnect():
+                        consecutive_errors = 0
+                    else:
+                        if self.use_display:
+                            self._display_error("NoDev")
+                        time.sleep(5)
+                else:
+                    time.sleep(2)
+
+            except Exception as e:
+                # Andere Fehler abfangen
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if self.debug:
+                    self._log("DEBUG: Exception in main loop:", str(e))
+                
+                if not print_voc_only:
+                    print(f"{timestamp}, ERROR: {e}")
+                
+                time.sleep(2)
 
 
 def main():
