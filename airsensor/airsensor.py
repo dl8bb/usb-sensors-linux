@@ -59,7 +59,7 @@ class AirSensor:
         self.rotate_display = rotate_display
         self.dev = None
         self.devh = None
-        self.last_voc = None
+        self.last_valid_voc = None  # Letzter gültiger VOC-Wert
         self._setup_signal_handler()
         self._init_display()
 
@@ -94,21 +94,41 @@ class AirSensor:
                 if self.rotate_display:
                     self._log("DEBUG: Display rotated 180 degrees", 0)
 
+    def _scroll_text(self, text, delay=0.05):
+        """Text über das Display scrollen."""
+        if not self.use_display:
+            return
+
+        try:
+            scrollphathd.clear()
+            scrollphathd.write_string(text)
+            scrollphathd.show()
+            
+            # Scrollen durch wiederholtes Aufrufen von scroll()
+            # scrollphathd.width enthält die Breite des Displays (17)
+            display_width = getattr(scrollphathd, 'width', 17)
+            
+            for _ in range(display_width):
+                scrollphathd.scroll(1, 0)
+                scrollphathd.show()
+                time.sleep(delay)
+                
+        except Exception as e:
+            if self.debug:
+                print(f"DEBUG: Scroll error: {e}")
+
     def _display_message(self, message, scroll=False, duration=2):
         """Nachricht auf dem Display anzeigen."""
         if not self.use_display:
             return
 
         try:
-            scrollphathd.clear()
-
             if scroll:
-                scrollphathd.write_string(message)
-                scrollphathd.show()
-                scrollphathd.scroll()
-                time.sleep(duration)
+                # Scrollende Anzeige
+                self._scroll_text(message)
             else:
-                # Kurze Nachricht direkt anzeigen
+                # Statische Anzeige
+                scrollphathd.clear()
                 scrollphathd.write_string(message)
                 scrollphathd.show()
         except Exception as e:
@@ -134,18 +154,6 @@ class AirSensor:
         except Exception as e:
             if self.debug:
                 print(f"DEBUG: Display VOC error: {e}")
-
-    def _display_error(self, message):
-        """Fehlermeldung auf dem Display anzeigen."""
-        if not self.use_display:
-            return
-
-        try:
-            scrollphathd.clear()
-            scrollphathd.write_string(message)
-            scrollphathd.show()
-        except Exception:
-            pass
 
     def _release_usb_device(self, signum=None, frame=None):
         """USB-Gerä··t freigeben und beenden."""
@@ -256,7 +264,7 @@ class AirSensor:
                 time.sleep(10)
                 counter += 1
                 if counter == 10:
-                    self._log("Error: Device not found")
+                    self._log("ERROR: Device not found")
                     sys.exit(1)
             else:
                 break
@@ -285,7 +293,7 @@ class AirSensor:
             self.devh.set_configuration()
             usb.util.claim_interface(self.devh, 0)
         except usb.core.USBError as e:
-            self._log("Error: claim failed with error:", str(e))
+            self._log("ERROR: claim failed with error:", str(e))
             sys.exit(1)
 
         return self.devh
@@ -395,8 +403,12 @@ class AirSensor:
                     else:
                         print(f"{timestamp}, ERROR: Invalid result code")
                     
+                    # Bei Fehler: Letzten gültigen Wert auf dem Display anzeigen
                     if self.use_display:
-                        self._display_error("Err")
+                        if self.last_valid_voc is not None:
+                            self._display_voc(self.last_valid_voc)
+                        # Falls noch kein gültiger Wert vorliegt, nichts anzeigen oder "Wait"
+                        # (aktuell wird das Display einfach nicht aktualisiert)
                     
                     # Prüfen ob wir neu verbinden müssen
                     if consecutive_errors >= max_consecutive_errors:
@@ -406,10 +418,13 @@ class AirSensor:
                             consecutive_errors = 0
                         else:
                             if self.use_display:
-                                self._display_error("NoDev")
+                                self._display_message("NoDev", scroll=True)
                             time.sleep(5)
+                            
                 elif self.VOC_MIN <= voc <= self.VOC_MAX:
+                    # Gültiger Wert: speichern und anzeigen
                     consecutive_errors = 0
+                    self.last_valid_voc = voc
                     
                     if print_voc_only:
                         print(voc)
@@ -418,7 +433,9 @@ class AirSensor:
                     
                     if self.use_display:
                         self._display_voc(voc)
+                        
                 else:
+                    # Wert außerhalb des Bereichs
                     consecutive_errors = 0
                     
                     if print_voc_only:
@@ -426,8 +443,12 @@ class AirSensor:
                     else:
                         print(f"{timestamp}, VOC: {voc}, RESULT: Error value out of range")
                     
+                    # Auch hier letzten gültigen Wert anzeigen
                     if self.use_display:
-                        self._display_message(f"Err:{voc}", scroll=True)
+                        if self.last_valid_voc is not None:
+                            self._display_voc(self.last_valid_voc)
+                        else:
+                            self._display_voc(voc)
 
                 # Wenn nur ein Wert gelesen werden soll, beenden
                 if one_read:
@@ -445,8 +466,10 @@ class AirSensor:
                 if not print_voc_only:
                     print(f"{timestamp}, ERROR: USB error - attempting reconnect")
                 
+                # Letzten gültigen Wert auf dem Display anzeigen
                 if self.use_display:
-                    self._display_error("Reconn")
+                    if self.last_valid_voc is not None:
+                        self._display_voc(self.last_valid_voc)
                 
                 consecutive_errors += 1
                 if consecutive_errors >= max_consecutive_errors:
@@ -454,7 +477,7 @@ class AirSensor:
                         consecutive_errors = 0
                     else:
                         if self.use_display:
-                            self._display_error("NoDev")
+                            self._display_message("NoDev", scroll=True)
                         time.sleep(5)
                 else:
                     time.sleep(2)
@@ -467,6 +490,11 @@ class AirSensor:
                 
                 if not print_voc_only:
                     print(f"{timestamp}, ERROR: {e}")
+                
+                # Letzten gültigen Wert auf dem Display anzeigen
+                if self.use_display:
+                    if self.last_valid_voc is not None:
+                        self._display_voc(self.last_valid_voc)
                 
                 time.sleep(2)
 
